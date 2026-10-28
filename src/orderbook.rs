@@ -1,10 +1,14 @@
 //! A limit order book with price-time priority.
 //!
-//! Prices are integer ticks so that levels can be keyed exactly. Each price
-//! level is a FIFO queue; an incoming order trades against the best opposite
-//! level first and, within a level, against the oldest resting order first.
+//! Prices are integer ticks so that levels can be keyed exactly. An incoming
+//! order trades against the best opposite level first and, within a level,
+//! against the oldest resting order first.
+//!
+//! Resting orders live in a slab (`nodes`) and each price level is a doubly
+//! linked list threaded through it. Cancelling an order looks up its slot and
+//! unlinks it in O(1), however long its queue is; freed slots are reused.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 
 pub type OrderId = u64;
 pub type Price = i64;
@@ -24,18 +28,75 @@ pub struct Fill {
     pub qty: Qty,
 }
 
+/// Marks the end of a linked list.
+const NIL: usize = usize::MAX;
+
 #[derive(Debug, Clone, Copy)]
-struct Resting {
+struct Node {
     id: OrderId,
+    side: Side,
+    price: Price,
     qty: Qty,
+    prev: usize,
+    next: usize,
+}
+
+/// A FIFO queue of resting orders at one price.
+#[derive(Debug, Clone, Copy)]
+struct Level {
+    head: usize,
+    tail: usize,
+    qty: Qty,
+}
+
+impl Level {
+    const EMPTY: Level = Level {
+        head: NIL,
+        tail: NIL,
+        qty: 0,
+    };
+
+    fn is_empty(&self) -> bool {
+        self.head == NIL
+    }
+}
+
+fn push_back(nodes: &mut [Node], level: &mut Level, slot: usize) {
+    nodes[slot].prev = level.tail;
+    nodes[slot].next = NIL;
+    if level.tail == NIL {
+        level.head = slot;
+    } else {
+        nodes[level.tail].next = slot;
+    }
+    level.tail = slot;
+    level.qty += nodes[slot].qty;
+}
+
+fn unlink(nodes: &mut [Node], level: &mut Level, slot: usize) {
+    let Node { prev, next, qty, .. } = nodes[slot];
+    if prev == NIL {
+        level.head = next;
+    } else {
+        nodes[prev].next = next;
+    }
+    if next == NIL {
+        level.tail = prev;
+    } else {
+        nodes[next].prev = prev;
+    }
+    level.qty -= qty;
 }
 
 #[derive(Debug, Default)]
 pub struct OrderBook {
-    bids: BTreeMap<Price, VecDeque<Resting>>,
-    asks: BTreeMap<Price, VecDeque<Resting>>,
-    /// Where each resting order sits, for cancels.
-    index: HashMap<OrderId, (Side, Price)>,
+    bids: BTreeMap<Price, Level>,
+    asks: BTreeMap<Price, Level>,
+    nodes: Vec<Node>,
+    /// Slots in `nodes` that can be reused.
+    free: Vec<usize>,
+    /// Slot of each resting order, for cancels.
+    index: HashMap<OrderId, usize>,
 }
 
 impl OrderBook {
@@ -57,7 +118,7 @@ impl OrderBook {
             Side::Buy => &self.bids,
             Side::Sell => &self.asks,
         };
-        book.get(&price).map_or(0, |level| level.iter().map(|o| o.qty).sum())
+        book.get(&price).map_or(0, |level| level.qty)
     }
 
     pub fn order_count(&self) -> usize {
@@ -70,12 +131,30 @@ impl OrderBook {
         let mut fills = Vec::new();
         let remaining = self.match_against(id, side, qty, Some(price), &mut fills);
         if remaining > 0 {
+            let node = Node {
+                id,
+                side,
+                price,
+                qty: remaining,
+                prev: NIL,
+                next: NIL,
+            };
+            let slot = match self.free.pop() {
+                Some(slot) => {
+                    self.nodes[slot] = node;
+                    slot
+                }
+                None => {
+                    self.nodes.push(node);
+                    self.nodes.len() - 1
+                }
+            };
             let book = match side {
                 Side::Buy => &mut self.bids,
                 Side::Sell => &mut self.asks,
             };
-            book.entry(price).or_default().push_back(Resting { id, qty: remaining });
-            self.index.insert(id, (side, price));
+            push_back(&mut self.nodes, book.entry(price).or_insert(Level::EMPTY), slot);
+            self.index.insert(id, slot);
         }
         fills
     }
@@ -89,18 +168,20 @@ impl OrderBook {
 
     /// Cancels a resting order. Returns false if it is not in the book.
     pub fn cancel(&mut self, id: OrderId) -> bool {
-        let Some((side, price)) = self.index.remove(&id) else {
+        let Some(slot) = self.index.remove(&id) else {
             return false;
         };
+        let Node { side, price, .. } = self.nodes[slot];
         let book = match side {
             Side::Buy => &mut self.bids,
             Side::Sell => &mut self.asks,
         };
         let level = book.get_mut(&price).expect("indexed order has a level");
-        level.retain(|o| o.id != id);
+        unlink(&mut self.nodes, level, slot);
         if level.is_empty() {
             book.remove(&price);
         }
+        self.free.push(slot);
         true
     }
 
@@ -119,8 +200,8 @@ impl OrderBook {
                 Side::Buy => self.asks.first_entry(),
                 Side::Sell => self.bids.last_entry(),
             };
-            let Some(mut level) = best else { break };
-            let price = *level.key();
+            let Some(mut entry) = best else { break };
+            let price = *entry.key();
             let crosses = match (side, limit) {
                 (_, None) => true,
                 (Side::Buy, Some(l)) => price <= l,
@@ -130,9 +211,10 @@ impl OrderBook {
                 break;
             }
 
-            let queue = level.get_mut();
-            while qty > 0 {
-                let Some(maker) = queue.front_mut() else { break };
+            let level = entry.get_mut();
+            while qty > 0 && !level.is_empty() {
+                let slot = level.head;
+                let maker = &mut self.nodes[slot];
                 let traded = qty.min(maker.qty);
                 fills.push(Fill {
                     maker: maker.id,
@@ -141,14 +223,18 @@ impl OrderBook {
                     qty: traded,
                 });
                 qty -= traded;
-                maker.qty -= traded;
-                if maker.qty == 0 {
-                    self.index.remove(&maker.id);
-                    queue.pop_front();
+                if traded == maker.qty {
+                    let maker_id = maker.id;
+                    unlink(&mut self.nodes, level, slot);
+                    self.index.remove(&maker_id);
+                    self.free.push(slot);
+                } else {
+                    maker.qty -= traded;
+                    level.qty -= traded;
                 }
             }
-            if queue.is_empty() {
-                level.remove();
+            if level.is_empty() {
+                entry.remove();
             }
         }
         qty
@@ -215,6 +301,20 @@ mod tests {
     }
 
     #[test]
+    fn cancel_from_middle_of_queue_keeps_time_priority() {
+        let mut book = OrderBook::new();
+        book.limit(1, Side::Sell, 100, 1);
+        book.limit(2, Side::Sell, 100, 2);
+        book.limit(3, Side::Sell, 100, 3);
+        assert!(book.cancel(2));
+        assert_eq!(book.depth(Side::Sell, 100), 4);
+
+        let fills = book.market(4, Side::Buy, 4);
+        let makers: Vec<OrderId> = fills.iter().map(|f| f.maker).collect();
+        assert_eq!(makers, vec![1, 3]);
+    }
+
+    #[test]
     fn market_order_larger_than_book_is_partially_filled() {
         let mut book = OrderBook::new();
         book.limit(1, Side::Buy, 99, 4);
@@ -230,6 +330,16 @@ mod tests {
         book.market(2, Side::Buy, 5);
         assert_eq!(book.order_count(), 0);
         assert!(!book.cancel(1));
+    }
+
+    #[test]
+    fn freed_slots_are_reused() {
+        let mut book = OrderBook::new();
+        book.limit(1, Side::Buy, 99, 1);
+        book.cancel(1);
+        book.limit(2, Side::Buy, 98, 1);
+        assert_eq!(book.nodes.len(), 1);
+        assert_eq!(book.best_bid(), Some(98));
     }
 
     #[test]
