@@ -34,14 +34,19 @@ The spread column here is the time average of the full spread, including the γ�
 
 `orderbook.rs` is a limit order book with price-time priority on integer price ticks: limit orders (marketable part trades, the rest rests), market orders, and cancels.
 
-`cargo run --release --bin bench_orderbook` sends 2M random operations (45% limit, 45% cancel, 10% market) to a book that stays around 800 resting orders:
+Resting orders live in a slab, and each price level is a doubly linked list threaded through it, so a cancel unlinks its order in O(1) regardless of queue length.
 
-| Metric | Value |
-|---|---:|
-| Throughput | 3.3 M ops/s |
-| Mean latency | ~300 ns/op |
+`cargo run --release --bin bench_orderbook` sends 2M random operations in two scenarios:
 
-Measured on a laptop (single thread, release build). Each price level is a `VecDeque`, so a cancel scans its level: when levels grow to thousands of orders, latency rises to ~11 µs/op. Fixing that is the first item on the roadmap.
+- **balanced**: 45% limit, 45% cancel, 10% market; the book stays around 800 resting orders
+- **deep**: 60% limit, 30% cancel, 10% market; the book grows to ~400k orders, so levels hold thousands
+
+| Scenario | `VecDeque` per level | Slab + linked list |
+|---|---:|---:|
+| balanced | 307 ns/op | ~255 ns/op |
+| deep | 14.9 µs/op | ~0.5 µs/op |
+
+Both versions produce the same fills on the same order flow. Mean latency, single thread, release build, on a laptop.
 
 ## Layout
 
@@ -65,7 +70,7 @@ cargo run --release --bin bench_orderbook
 
 - [x] Avellaneda–Stoikov strategy and reproduction of the paper's experiment
 - [x] Price-time priority order book with tests and a throughput benchmark
-- [ ] O(1) cancel: order slab + intrusive linked list per level, with before/after benchmark
+- [x] O(1) cancel: order slab + intrusive linked list per level, with before/after benchmark
 - [ ] Latency percentiles (p50 / p99 / p99.9) instead of the mean
 - [ ] Run the market maker against the order book with Poisson order flow, so queue position matters
 - [ ] Record L2 order book data from a crypto exchange WebSocket and replay it
