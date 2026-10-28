@@ -24,8 +24,14 @@ fn main() {
             "{:<10} {:>8} {:>8} {:>8} {:>8} {:>8}",
             "strategy", "spread", "profit", "std(P)", "final q", "std(q)"
         );
-        print_row("inventory", &run(&p, &InventoryStrategy { params: p }, N_PATHS, SEED));
-        print_row("symmetric", &run(&p, &SymmetricStrategy { params: p }, N_PATHS, SEED));
+        print_row(
+            "inventory",
+            &run(&p, &InventoryStrategy { params: p }, N_PATHS, SEED),
+        );
+        print_row(
+            "symmetric",
+            &run(&p, &SymmetricStrategy { params: p }, N_PATHS, SEED),
+        );
         println!();
     }
 }

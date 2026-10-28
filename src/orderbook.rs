@@ -74,7 +74,9 @@ fn push_back(nodes: &mut [Node], level: &mut Level, slot: usize) {
 }
 
 fn unlink(nodes: &mut [Node], level: &mut Level, slot: usize) {
-    let Node { prev, next, qty, .. } = nodes[slot];
+    let Node {
+        prev, next, qty, ..
+    } = nodes[slot];
     if prev == NIL {
         level.head = next;
     } else {
@@ -153,7 +155,11 @@ impl OrderBook {
                 Side::Buy => &mut self.bids,
                 Side::Sell => &mut self.asks,
             };
-            push_back(&mut self.nodes, book.entry(price).or_insert(Level::EMPTY), slot);
+            push_back(
+                &mut self.nodes,
+                book.entry(price).or_insert(Level::EMPTY),
+                slot,
+            );
             self.index.insert(id, slot);
         }
         fills
@@ -350,7 +356,11 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(3);
         let mut book = OrderBook::new();
         for id in 0..10_000 {
-            let side = if rng.gen_bool(0.5) { Side::Buy } else { Side::Sell };
+            let side = if rng.gen_bool(0.5) {
+                Side::Buy
+            } else {
+                Side::Sell
+            };
             book.limit(id, side, rng.gen_range(90..=110), rng.gen_range(1..=10));
             if let (Some(b), Some(a)) = (book.best_bid(), book.best_ask()) {
                 assert!(b < a, "crossed book: bid {b} >= ask {a}");

@@ -18,7 +18,11 @@ pub struct PathResult {
     pub mean_spread: f64,
 }
 
-pub fn simulate_path<S: Strategy, R: Rng>(params: &Params, strategy: &S, rng: &mut R) -> PathResult {
+pub fn simulate_path<S: Strategy, R: Rng>(
+    params: &Params,
+    strategy: &S,
+    rng: &mut R,
+) -> PathResult {
     let n = params.n_steps();
     let step = params.sigma * params.dt.sqrt();
 

@@ -26,7 +26,11 @@ fn bench(name: &str, limit_share: f64, cancel_share: f64) {
 
     let start = Instant::now();
     for _ in 0..N_OPS {
-        let side = if rng.gen_bool(0.5) { Side::Buy } else { Side::Sell };
+        let side = if rng.gen_bool(0.5) {
+            Side::Buy
+        } else {
+            Side::Sell
+        };
         let r: f64 = rng.r#gen();
         if r < limit_share {
             let offset = rng.gen_range(1..=20);
@@ -34,7 +38,9 @@ fn bench(name: &str, limit_share: f64, cancel_share: f64) {
                 Side::Buy => 10_000 - offset + 3,
                 Side::Sell => 10_000 + offset - 3,
             };
-            fills += book.limit(next_id, side, price, rng.gen_range(1..=100)).len();
+            fills += book
+                .limit(next_id, side, price, rng.gen_range(1..=100))
+                .len();
             live.push(next_id);
             next_id += 1;
         } else if r < limit_share + cancel_share && !live.is_empty() {
@@ -52,8 +58,14 @@ fn bench(name: &str, limit_share: f64, cancel_share: f64) {
     println!("  fills:        {fills}");
     println!("  resting:      {}", book.order_count());
     println!("  elapsed:      {:.3} s", elapsed.as_secs_f64());
-    println!("  throughput:   {:.2} M ops/s", N_OPS as f64 / elapsed.as_secs_f64() / 1e6);
-    println!("  mean latency: {:.0} ns/op", elapsed.as_nanos() as f64 / N_OPS as f64);
+    println!(
+        "  throughput:   {:.2} M ops/s",
+        N_OPS as f64 / elapsed.as_secs_f64() / 1e6
+    );
+    println!(
+        "  mean latency: {:.0} ns/op",
+        elapsed.as_nanos() as f64 / N_OPS as f64
+    );
 }
 
 fn main() {
