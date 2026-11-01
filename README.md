@@ -46,7 +46,37 @@ Resting orders live in a slab, and each price level is a doubly linked list thre
 | balanced | 307 ns/op | ~255 ns/op |
 | deep | 14.9 µs/op | ~0.5 µs/op |
 
-Both versions produce the same fills on the same order flow. Mean latency, single thread, release build, on a laptop.
+Both versions produce the same fills on the same order flow. Mean latency, single thread, release build, on a laptop. The order flow is synthetic, so these numbers compare the two designs rather than predict performance on a real feed; for real data, see below.
+
+## Real market data: Binance futures L2
+
+`record_binance` records the Binance USD-M futures diff-depth and trade streams with the local receive time, and `replay_l2` rebuilds the book from the recording.
+
+Keeping a local book in sync follows Binance's documented procedure, implemented in `binance.rs`:
+
+1. open the stream, and fetch a REST snapshot while it buffers;
+2. drop events older than the snapshot (`u < lastUpdateId`);
+3. the first applied event must straddle the snapshot (`U <= lastUpdateId <= u`);
+4. after that, each event's `pu` must equal the previous event's `u`; otherwise an update was missed.
+
+Prices and sizes are parsed from their decimal strings straight into integer ticks (0.1) and lots (0.001), with no floating point. If the connection drops, the recorder reconnects and starts a new segment with a fresh snapshot.
+
+10 minutes of BTCUSDT (2026-11-01, 100 ms depth stream):
+
+| | p50 | p99 | p99.9 | max |
+|---|---:|---:|---:|---:|
+| levels changed per update | 42 | 154 | 768 | 1,200 |
+| parse JSON (µs) | 10.7 | 40.2 | 168.6 | 336.9 |
+| apply to book (µs) | 6.5 | 30.5 | 137.5 | 212.5 |
+| receive delay above its minimum (ms) | 6 | 79 | 465 | 1,042 |
+
+5,882 updates were applied with no sequence gaps, and the book was never crossed.
+
+- **Parsing costs more than updating the book.** Each price and size is allocated as a `String` before being converted, so the parser, not the `BTreeMap` (about 150 ns per changed level), is the bottleneck.
+- **The tail comes from large updates.** The p99.9 events change several hundred levels at once.
+- **Delay is measured as jitter only.** The local clock is not synchronized with the exchange's (it ran about 0.7 s behind), so only how far the receive delay rises above its minimum is meaningful.
+
+Timings are from `Instant` on Windows (100 ns resolution), single thread, release build, on a laptop.
 
 ## Layout
 
@@ -54,16 +84,22 @@ Both versions produce the same fills on the same order flow. Mean latency, singl
 src/
   avellaneda_stoikov.rs   model, quoting strategies
   simulation.rs           Monte Carlo of the market maker
-  orderbook.rs            matching engine
+  orderbook.rs            matching engine (order by order)
+  l2book.rs               price-level book for exchange depth feeds
+  binance.rs              Binance depth messages and book sync
   bin/
     reproduce_paper.rs
     bench_orderbook.rs
+    record_binance.rs     record depth + trades from Binance
+    replay_l2.rs          rebuild the book from a recording, with timings
 ```
 
 ```bash
 cargo test
 cargo run --release --bin reproduce_paper
 cargo run --release --bin bench_orderbook
+cargo run --release --bin record_binance -- btcusdt 600 data/btcusdt.jsonl
+cargo run --release --bin replay_l2 -- data/btcusdt.jsonl
 ```
 
 ## Roadmap
@@ -71,9 +107,10 @@ cargo run --release --bin bench_orderbook
 - [x] Avellaneda–Stoikov strategy and reproduction of the paper's experiment
 - [x] Price-time priority order book with tests and a throughput benchmark
 - [x] O(1) cancel: order slab + intrusive linked list per level, with before/after benchmark
-- [ ] Latency percentiles (p50 / p99 / p99.9) instead of the mean
+- [x] Record L2 order book data from a crypto exchange WebSocket and replay it
+- [x] Latency percentiles (p50 / p99 / p99.9) on real data
+- [ ] Zero-allocation parsing of depth updates (parsing is the current bottleneck)
 - [ ] Run the market maker against the order book with Poisson order flow, so queue position matters
-- [ ] Record L2 order book data from a crypto exchange WebSocket and replay it
 - [ ] Estimate A and k from recorded data
 - [ ] Order flow imbalance as a short-horizon signal; adverse selection analysis
 - [ ] Inventory limits (Guéant, Lehalle and Fernandez-Tapia, 2013)
