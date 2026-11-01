@@ -97,6 +97,27 @@ pub enum SyncError {
     BadNumber(String),
 }
 
+impl std::fmt::Display for SyncError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SyncError::NoOverlap {
+                snapshot_id,
+                first_id,
+                final_id,
+            } => write!(
+                f,
+                "first event [{first_id}, {final_id}] does not cover snapshot {snapshot_id}"
+            ),
+            SyncError::Gap { expected, got } => {
+                write!(f, "missed an event: expected pu {expected}, got {got}")
+            }
+            SyncError::BadNumber(s) => write!(f, "not a decimal number: {s:?}"),
+        }
+    }
+}
+
+impl std::error::Error for SyncError {}
+
 #[derive(Debug, PartialEq)]
 pub enum Applied {
     /// Older than the snapshot; ignored.
